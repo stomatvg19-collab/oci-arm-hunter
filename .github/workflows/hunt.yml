@@ -1,0 +1,125 @@
+name: hunt
+
+# Безкоштовні ARM-машини Oracle роздає з решток потужностей: у популярних
+# регіонах вони розлітаються за секунди, тому "Out of host capacity" на першій
+# спробі — норма. Єдиний робочий підхід — пробувати регулярно й довго.
+#
+# Чому GitHub Actions, а не цикл на власному комп'ютері: ноутбук вимикають,
+# а слот може звільнитись о третій ночі.
+
+on:
+  schedule:
+    # Раз на 5 хвилин — це мінімум, який дозволяє GitHub. Кожен запуск усередині
+    # сам крутить спроби ~4 хвилини, тому покриття виходить майже безперервним.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+# Два запуски одночасно створили б дві машини й вичерпали безкоштовну квоту.
+concurrency:
+  group: hunt
+  cancel-in-progress: false
+
+permissions:
+  issues: write    # щоб повідомити про успіх (GitHub сам надішле лист)
+  actions: write   # щоб вимкнути себе, коли машину вже спіймано
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Встановити OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Налаштувати доступ
+        run: |
+          mkdir -p ~/.oci
+          printf '%s' "${{ secrets.OCI_KEY }}" > ~/.oci/key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY }}
+          region=ca-toronto-1
+          key_file=$HOME/.oci/key.pem
+          EOF
+          chmod 600 ~/.oci/config ~/.oci/key.pem
+
+      - name: Полювання
+        id: hunt
+        env:
+          T: ${{ secrets.OCI_TENANCY }}
+          SUBNET: ${{ vars.SUBNET_ID }}
+          IMAGE: ${{ vars.IMAGE_ID }}
+          AD: ${{ vars.AVAILABILITY_DOMAIN }}
+          PUBKEY: ${{ vars.SSH_PUBKEY }}
+        run: |
+          set +e
+          echo "$PUBKEY" > /tmp/id.pub
+
+          # Якщо машина вже є — виходимо миттєво. Саме завдяки цій перевірці
+          # заплановані запуски після успіху коштують секунди, а не хвилини.
+          existing=$(oci compute instance list -c "$T" --lifecycle-state RUNNING \
+              --query 'data[?"display-name"==`inboost-stand`].id | [0]' --raw-output 2>/dev/null)
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+              echo "Машина вже працює: $existing"
+              echo "found=already" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+
+          deadline=$(( $(date +%s) + 240 ))
+          n=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+              n=$((n+1))
+              out=$(oci compute instance launch \
+                  -c "$T" \
+                  --availability-domain "$AD" \
+                  --shape VM.Standard.A1.Flex \
+                  --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+                  --image-id "$IMAGE" \
+                  --subnet-id "$SUBNET" \
+                  --display-name inboost-stand \
+                  --assign-public-ip true \
+                  --boot-volume-size-in-gbs 100 \
+                  --ssh-authorized-keys-file /tmp/id.pub \
+                  --query 'data.id' --raw-output 2>&1)
+
+              if echo "$out" | grep -q '^ocid1.instance'; then
+                  id=$(echo "$out" | grep -o '^ocid1.instance[^ ]*' | head -1)
+                  echo "✅ Спіймали зі спроби №$n: $id"
+                  echo "found=new" >> "$GITHUB_OUTPUT"
+                  echo "instance=$id" >> "$GITHUB_OUTPUT"
+                  exit 0
+              fi
+
+              echo "спроба $n — $(echo "$out" | grep -o '"message": "[^"]*"' | head -1)"
+              sleep 30
+          done
+          echo "found=no" >> "$GITHUB_OUTPUT"
+
+      - name: Дізнатись публічний IP
+        if: steps.hunt.outputs.found == 'new'
+        id: ip
+        run: |
+          sleep 45
+          ip=$(oci compute instance list-vnics --instance-id "${{ steps.hunt.outputs.instance }}" \
+               --query 'data[0]."public-ip"' --raw-output)
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+
+      - name: Повідомити про успіх і вимкнути полювання
+        if: steps.hunt.outputs.found == 'new'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "✅ ARM-машина спіймана" --body "$(cat <<EOF
+          Oracle нарешті дав вільний слот.
+
+          - **Instance:** \`${{ steps.hunt.outputs.instance }}\`
+          - **Публічний IP:** \`${{ steps.ip.outputs.ip }}\`
+          - **Підключення:** \`ssh -i ~/.ssh/oracle_inboost ubuntu@${{ steps.ip.outputs.ip }}\`
+
+          Полювання вимкнено — більше запусків не буде.
+          EOF
+          )"
+          gh workflow disable hunt.yml
