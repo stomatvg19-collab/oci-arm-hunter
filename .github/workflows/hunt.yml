@@ -86,7 +86,16 @@ jobs:
 
           deadline=$(( $(date +%s) + 20400 ))   # 5 год 40 хв, із запасом до таймауту
           n=0
+
+          # ⚠️ Занадто часті спроби шкідливі: Oracle віддає "Too many requests for
+          # the user" і навіть не дивиться на вільні потужності — спроба згорає
+          # даремно. Заміряно: пауза 20 с призводить саме до цього.
+          # Тому пауза адаптивна — подвоюється на кожне обмеження (до 10 хв)
+          # і повертається до звичайної, щойно Oracle знову відповідає по суті.
+          pause=60
+
           while [ "$(date +%s)" -lt "$deadline" ]; do
+              throttled=0
               for size in $SIZES; do
                   cpu=${size%%:*}
                   ram=${size##*:}
@@ -115,8 +124,19 @@ jobs:
                   fi
 
                   echo "спроба $n ($cpu/$ram) — $(echo "$out" | grep -o '"message": "[^"]*"' | head -1)"
+                  echo "$out" | grep -qi "too many requests" && throttled=1
+
+                  sleep 5   # коротка пауза між двома розмірами в одному циклі
               done
-              sleep 20
+
+              if [ "$throttled" -eq 1 ]; then
+                  pause=$(( pause * 2 ))
+                  [ "$pause" -gt 600 ] && pause=600
+                  echo "⏳ Oracle обмежує частоту — чекаю ${pause}с"
+              else
+                  pause=60
+              fi
+              sleep "$pause"
           done
           echo "found=no" >> "$GITHUB_OUTPUT"
 
