@@ -68,33 +68,48 @@ jobs:
               exit 0
           fi
 
+          # Oracle роздає потужності шматками: втиснути 2 ядра / 12 ГБ у залишки
+          # набагато простіше, ніж знайти суцільний блок під 4 / 24. Тому в кожному
+          # циклі пробуємо обидва розміри — спершу бажаний, потім запасний.
+          #
+          # Взяти менше не пастка: безкоштовний ліміт (4 ядра / 24 ГБ) можна
+          # витратити як завгодно, а машину потім дозволено збільшити — зупинити,
+          # змінити конфігурацію, запустити.
+          SIZES='4:24 2:12'
+
           deadline=$(( $(date +%s) + 240 ))
           n=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-              n=$((n+1))
-              out=$(oci compute instance launch \
-                  -c "$T" \
-                  --availability-domain "$AD" \
-                  --shape VM.Standard.A1.Flex \
-                  --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-                  --image-id "$IMAGE" \
-                  --subnet-id "$SUBNET" \
-                  --display-name inboost-stand \
-                  --assign-public-ip true \
-                  --boot-volume-size-in-gbs 100 \
-                  --ssh-authorized-keys-file /tmp/id.pub \
-                  --query 'data.id' --raw-output 2>&1)
+              for size in $SIZES; do
+                  cpu=${size%%:*}
+                  ram=${size##*:}
+                  n=$((n+1))
 
-              if echo "$out" | grep -q '^ocid1.instance'; then
-                  id=$(echo "$out" | grep -o '^ocid1.instance[^ ]*' | head -1)
-                  echo "✅ Спіймали зі спроби №$n: $id"
-                  echo "found=new" >> "$GITHUB_OUTPUT"
-                  echo "instance=$id" >> "$GITHUB_OUTPUT"
-                  exit 0
-              fi
+                  out=$(oci compute instance launch \
+                      -c "$T" \
+                      --availability-domain "$AD" \
+                      --shape VM.Standard.A1.Flex \
+                      --shape-config "{\"ocpus\":$cpu,\"memoryInGBs\":$ram}" \
+                      --image-id "$IMAGE" \
+                      --subnet-id "$SUBNET" \
+                      --display-name inboost-stand \
+                      --assign-public-ip true \
+                      --boot-volume-size-in-gbs 100 \
+                      --ssh-authorized-keys-file /tmp/id.pub \
+                      --query 'data.id' --raw-output 2>&1)
 
-              echo "спроба $n — $(echo "$out" | grep -o '"message": "[^"]*"' | head -1)"
-              sleep 30
+                  if echo "$out" | grep -q '^ocid1.instance'; then
+                      id=$(echo "$out" | grep -o '^ocid1.instance[^ ]*' | head -1)
+                      echo "✅ Спіймали зі спроби №$n: $cpu ядра / $ram ГБ — $id"
+                      echo "found=new" >> "$GITHUB_OUTPUT"
+                      echo "instance=$id" >> "$GITHUB_OUTPUT"
+                      echo "size=$cpu ядра / $ram ГБ" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  echo "спроба $n ($cpu/$ram) — $(echo "$out" | grep -o '"message": "[^"]*"' | head -1)"
+              done
+              sleep 20
           done
           echo "found=no" >> "$GITHUB_OUTPUT"
 
@@ -115,6 +130,7 @@ jobs:
           gh issue create --title "✅ ARM-машина спіймана" --body "$(cat <<EOF
           Oracle нарешті дав вільний слот.
 
+          - **Конфігурація:** ${{ steps.hunt.outputs.size }}
           - **Instance:** \`${{ steps.hunt.outputs.instance }}\`
           - **Публічний IP:** \`${{ steps.ip.outputs.ip }}\`
           - **Підключення:** \`ssh -i ~/.ssh/oracle_inboost ubuntu@${{ steps.ip.outputs.ip }}\`
