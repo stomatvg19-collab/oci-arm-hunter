@@ -127,6 +127,14 @@ jobs:
                   echo "спроба $n ($cpu/$ram) — $(echo "$out" | grep -o '"message": "[^"]*"' | head -1)"
                   echo "$out" | grep -qi "too many requests" && throttled=1
 
+                  # Квоту на диски зайняли інші ресурси — жодна наступна спроба не
+                  # пройде, поки хтось не звільнить місце. Крутити 6 годин марно.
+                  if echo "$out" | grep -q "bootVolumeQuota"; then
+                      echo "::error::Квота на диски (200 ГБ Always Free) вичерпана — полювання безглузде. Деталі: workflow diag."
+                      echo "found=quota" >> "$GITHUB_OUTPUT"
+                      exit 1
+                  fi
+
                   sleep 5   # коротка пауза між двома розмірами в одному циклі
               done
 

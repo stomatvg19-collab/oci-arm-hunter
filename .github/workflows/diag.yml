@@ -47,7 +47,7 @@ jobs:
               --query-text "query volume resources where lifecycleState != 'TERMINATED'" \
               --query 'data.items[].{name:"display-name",state:"lifecycle-state",created:"time-created",id:identifier}' \
               --output table
-          echo "=== Розміри boot volumes у $AD ==="
+          echo "=== Розміри boot volumes ==="
           for ad in $(oci iam availability-domain list -c "$T" --query 'data[].name' --raw-output | tr -d '[]",'); do
               oci bv boot-volume list -c "$T" --availability-domain "$ad" \
                   --query 'data[].{name:"display-name",gb:"size-in-gbs",state:"lifecycle-state",id:id}' \
