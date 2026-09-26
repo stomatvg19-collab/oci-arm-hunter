@@ -1,0 +1,68 @@
+name: diag
+
+# Ручна діагностика: що зараз є в тенансі (машини, диски) і скільки лишилось
+# квоти на блокове сховище. Запускати з вкладки Actions, коли полювання
+# впирається не в "Out of host capacity", а в якийсь ліміт.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Встановити OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Налаштувати доступ
+        run: |
+          mkdir -p ~/.oci
+          printf '%s' "${{ secrets.OCI_KEY }}" > ~/.oci/key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY }}
+          region=ca-toronto-1
+          key_file=$HOME/.oci/key.pem
+          EOF
+          chmod 600 ~/.oci/config ~/.oci/key.pem
+
+      - name: Машини й диски в усіх компартментах
+        env:
+          T: ${{ secrets.OCI_TENANCY }}
+        run: |
+          echo "=== Машини (крім видалених) ==="
+          oci search resource structured-search \
+              --query-text "query instance resources where lifecycleState != 'TERMINATED'" \
+              --query 'data.items[].{name:"display-name",state:"lifecycle-state",created:"time-created",id:identifier}' \
+              --output table
+          echo "=== Boot volumes ==="
+          oci search resource structured-search \
+              --query-text "query bootvolume resources where lifecycleState != 'TERMINATED'" \
+              --query 'data.items[].{name:"display-name",state:"lifecycle-state",created:"time-created",id:identifier}' \
+              --output table
+          echo "=== Block volumes ==="
+          oci search resource structured-search \
+              --query-text "query volume resources where lifecycleState != 'TERMINATED'" \
+              --query 'data.items[].{name:"display-name",state:"lifecycle-state",created:"time-created",id:identifier}' \
+              --output table
+          echo "=== Розміри boot volumes у $AD ==="
+          for ad in $(oci iam availability-domain list -c "$T" --query 'data[].name' --raw-output | tr -d '[]",'); do
+              oci bv boot-volume list -c "$T" --availability-domain "$ad" \
+                  --query 'data[].{name:"display-name",gb:"size-in-gbs",state:"lifecycle-state",id:id}' \
+                  --output table 2>&1
+          done
+
+      - name: Ліміти блокового сховища
+        env:
+          T: ${{ secrets.OCI_TENANCY }}
+        run: |
+          oci limits value list -c "$T" --service-name block-storage --all \
+              --query 'data[?value > `0`].{name:name,scope:"scope-type",ad:"availability-domain",value:value}' \
+              --output table
+          for name in $(oci limits value list -c "$T" --service-name block-storage --all \
+                  --query 'data[?value > `0` && "scope-type"==`REGION`].name' --raw-output | tr -d '[]",'); do
+              echo "--- $name"
+              oci limits resource-availability get -c "$T" --service-name block-storage --limit-name "$name" 2>&1 | grep -E '"(used|available)"'
+          done
