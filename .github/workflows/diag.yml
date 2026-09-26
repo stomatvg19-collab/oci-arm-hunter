@@ -54,6 +54,17 @@ jobs:
                   --output table 2>&1
           done
 
+      - name: Характеристики машин
+        env:
+          T: ${{ secrets.OCI_TENANCY }}
+        run: |
+          for id in $(oci search resource structured-search                   --query-text "query instance resources where lifecycleState != 'TERMINATED'"                   --query 'data.items[].identifier' --raw-output | tr -d '[]",'); do
+              oci compute instance get --instance-id "$id"                   --query 'data.{name:"display-name",shape:shape,ocpus:"shape-config".ocpus,ram_gb:"shape-config"."memory-in-gbs",cpu:"shape-config"."processor-description",net_gbps:"shape-config"."networking-bandwidth-in-gbps",state:"lifecycle-state",created:"time-created",image:"source-details"."image-id"}'
+              oci compute image get --image-id "$(oci compute instance get --instance-id "$id" --query 'data."source-details"."image-id"' --raw-output)"                   --query 'data."display-name"' --raw-output 2>&1
+              echo "Публічний IP:"
+              oci compute instance list-vnics --instance-id "$id" --query 'data[].{"public":"public-ip","private":"private-ip"}' --output table
+          done
+
       - name: Ліміти блокового сховища
         env:
           T: ${{ secrets.OCI_TENANCY }}
